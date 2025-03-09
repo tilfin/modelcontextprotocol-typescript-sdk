@@ -434,15 +434,6 @@ test("should typecheck", () => {
       },
       WeatherResultSchema,
     );
-
-  false &&
-    weatherClient.notification({
-      method: "weather/alert",
-      params: {
-        severity: "warning",
-        message: "Storm approaching",
-      },
-    });
 });
 
 test("should handle client cancelling a request", async () => {

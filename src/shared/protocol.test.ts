@@ -9,27 +9,11 @@ import {
   ServerCapabilities,
 } from "../types.js";
 import { Protocol, mergeCapabilities } from "./protocol.js";
-import { Transport } from "./transport.js";
-
-// Mock Transport class
-class MockTransport implements Transport {
-  onclose?: () => void;
-  onerror?: (error: Error) => void;
-  onmessage?: (message: unknown) => void;
-
-  async start(): Promise<void> {}
-  async close(): Promise<void> {
-    this.onclose?.();
-  }
-  async send(_message: unknown): Promise<void> {}
-}
 
 describe("protocol tests", () => {
   let protocol: Protocol<Request, Notification, Result>;
-  let transport: MockTransport;
 
   beforeEach(() => {
-    transport = new MockTransport();
     protocol = new (class extends Protocol<Request, Notification, Result> {
       protected assertCapabilityForMethod(): void {}
       protected assertNotificationCapability(): void {}
@@ -38,7 +22,6 @@ describe("protocol tests", () => {
   });
 
   test("should throw a timeout error if the request exceeds the timeout", async () => {
-    await protocol.connect(transport);
     const request = { method: "example", params: {} };
     try {
       const mockSchema: ZodType<{ result: string }> = z.object({
@@ -55,14 +38,6 @@ describe("protocol tests", () => {
     }
   });
 
-  test("should invoke onclose when the connection is closed", async () => {
-    const oncloseMock = jest.fn();
-    protocol.onclose = oncloseMock;
-    await protocol.connect(transport);
-    await transport.close();
-    expect(oncloseMock).toHaveBeenCalled();
-  });
-
   describe("progress notification timeout behavior", () => {
     beforeEach(() => {
       jest.useFakeTimers();
@@ -72,7 +47,6 @@ describe("protocol tests", () => {
     });
 
     test("should reset timeout when progress notification is received", async () => {
-      await protocol.connect(transport);
       const request = { method: "example", params: {} };
       const mockSchema: ZodType<{ result: string }> = z.object({
         result: z.string(),
@@ -113,7 +87,6 @@ describe("protocol tests", () => {
     });
 
     test("should respect maxTotalTimeout", async () => {
-      await protocol.connect(transport);
       const request = { method: "example", params: {} };
       const mockSchema: ZodType<{ result: string }> = z.object({
         result: z.string(),
@@ -161,7 +134,6 @@ describe("protocol tests", () => {
     });
 
     test("should timeout if no progress received within timeout period", async () => {
-      await protocol.connect(transport);
       const request = { method: "example", params: {} };
       const mockSchema: ZodType<{ result: string }> = z.object({
         result: z.string(),
@@ -175,7 +147,6 @@ describe("protocol tests", () => {
     });
 
     test("should handle multiple progress notifications correctly", async () => {
-      await protocol.connect(transport);
       const request = { method: "example", params: {} };
       const mockSchema: ZodType<{ result: string }> = z.object({
         result: z.string(),

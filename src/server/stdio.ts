@@ -1,7 +1,7 @@
 import process from "node:process";
 import { Readable, Writable } from "node:stream";
 import { ReadBuffer, serializeMessage } from "../shared/stdio.js";
-import { JSONRPCMessage } from "../types.js";
+import { JSONRPCError, JSONRPCMessage, JSONRPCResponse } from "../types.js";
 import { Transport } from "../shared/transport.js";
 
 /**
@@ -20,7 +20,7 @@ export class StdioServerTransport implements Transport {
 
   onclose?: () => void;
   onerror?: (error: Error) => void;
-  onmessage?: (message: JSONRPCMessage) => void;
+  onmessage?: (message: JSONRPCMessage, callback: (response: JSONRPCResponse | JSONRPCError) => void) => void;
 
   // Arrow functions to bind `this` properly, while maintaining function identity.
   _ondata = (chunk: Buffer) => {
@@ -54,7 +54,9 @@ export class StdioServerTransport implements Transport {
           break;
         }
 
-        this.onmessage?.(message);
+        this.onmessage?.(message, (response) => {
+          this.send(response);
+        });
       } catch (error) {
         this.onerror?.(error as Error);
       }

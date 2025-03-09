@@ -1,33 +1,31 @@
-import {
-  mergeCapabilities,
-  Protocol,
-  ProtocolOptions,
-  RequestOptions,
-} from "../shared/protocol.js";
+import { ZodLiteral, ZodObject, ZodType, z } from "zod";
 import {
   ClientCapabilities,
-  CreateMessageRequest,
-  CreateMessageResultSchema,
-  EmptyResultSchema,
+  ErrorCode,
   Implementation,
-  InitializedNotificationSchema,
-  InitializeRequest,
-  InitializeRequestSchema,
-  InitializeResult,
-  LATEST_PROTOCOL_VERSION,
-  ListRootsRequest,
-  ListRootsResultSchema,
-  LoggingMessageNotification,
-  Notification,
-  Request,
-  ResourceUpdatedNotification,
+  JSONRPCError,
+  JSONRPCRequest,
+  JSONRPCResponse,
+  McpError,
+  RequestId,
   Result,
   ServerCapabilities,
-  ServerNotification,
-  ServerRequest,
-  ServerResult,
-  SUPPORTED_PROTOCOL_VERSIONS,
 } from "../types.js";
+import { Transport } from "../shared/transport.js";
+
+/**
+ * Additional initialization options.
+ */
+export type ProtocolOptions = {
+  /**
+   * Whether to restrict emitted requests to only those that the remote side has indicated that they can handle, through their advertised capabilities.
+   *
+   * Note that this DOES NOT affect checking of _local_ side capabilities, as it is considered a logic error to mis-specify those.
+   *
+   * Currently this defaults to false, for backwards compatibility with SDK versions that did not advertise capabilities correctly. In future, this will default to true.
+   */
+  enforceStrictCapabilities?: boolean;
+};
 
 export type ServerOptions = ProtocolOptions & {
   /**
@@ -42,6 +40,57 @@ export type ServerOptions = ProtocolOptions & {
 };
 
 /**
+ * The default request timeout, in miliseconds.
+ */
+export const DEFAULT_REQUEST_TIMEOUT_MSEC = 60000;
+
+/**
+ * Options that can be given per request.
+ */
+export type RequestOptions = {
+  /**
+   * If set, requests progress notifications from the remote end (if supported). When progress notifications are received, this callback will be invoked.
+   */
+  //onprogress?: ProgressCallback;
+
+  /**
+   * Can be used to cancel an in-flight request. This will cause an AbortError to be raised from request().
+   */
+  signal?: AbortSignal;
+
+  /**
+   * A timeout (in milliseconds) for this request. If exceeded, an McpError with code `RequestTimeout` will be raised from request().
+   *
+   * If not specified, `DEFAULT_REQUEST_TIMEOUT_MSEC` will be used as the timeout.
+   */
+  timeout?: number;
+
+  /**
+   * If true, receiving a progress notification will reset the request timeout.
+   * This is useful for long-running operations that send periodic progress updates.
+   * Default: false
+   */
+  resetTimeoutOnProgress?: boolean;
+
+  /**
+   * Maximum total time (in milliseconds) to wait for a response.
+   * If exceeded, an McpError with code `RequestTimeout` will be raised, regardless of progress notifications.
+   * If not specified, there is no maximum total timeout.
+   */
+  maxTotalTimeout?: number;
+};
+
+/**
+ * Extra data given to request handlers.
+ */
+export type RequestHandlerExtra = {
+  /**
+   * An abort signal used to communicate if the request was cancelled from the sender's side.
+   */
+  signal: AbortSignal;
+};
+
+/**
  * An MCP server on top of a pluggable transport.
  *
  * This server will automatically respond to the initialization flow as initiated from the client.
@@ -51,39 +100,31 @@ export type ServerOptions = ProtocolOptions & {
  * ```typescript
  * // Custom schemas
  * const CustomRequestSchema = RequestSchema.extend({...})
- * const CustomNotificationSchema = NotificationSchema.extend({...})
  * const CustomResultSchema = ResultSchema.extend({...})
  *
  * // Type aliases
  * type CustomRequest = z.infer<typeof CustomRequestSchema>
- * type CustomNotification = z.infer<typeof CustomNotificationSchema>
  * type CustomResult = z.infer<typeof CustomResultSchema>
  *
  * // Create typed server
- * const server = new Server<CustomRequest, CustomNotification, CustomResult>({
+ * const server = new Server({
  *   name: "CustomServer",
  *   version: "1.0.0"
  * })
  * ```
  */
-export class Server<
-  RequestT extends Request = Request,
-  NotificationT extends Notification = Notification,
-  ResultT extends Result = Result,
-> extends Protocol<
-  ServerRequest | RequestT,
-  ServerNotification | NotificationT,
-  ServerResult | ResultT
-> {
-  private _clientCapabilities?: ClientCapabilities;
-  private _clientVersion?: Implementation;
+export class Server {
+  private _transport?: Transport;
+
+  private _requestHandlers: Map<string,
+    (
+      request: JSONRPCRequest,
+      extra: RequestHandlerExtra,
+    ) => Promise<Result>
+  > = new Map();
+
   private _capabilities: ServerCapabilities;
   private _instructions?: string;
-
-  /**
-   * Callback for when initialization has fully completed (i.e., the client has sent an `initialized` notification).
-   */
-  oninitialized?: () => void;
 
   /**
    * Initializes this server with the given name and version information.
@@ -92,101 +133,142 @@ export class Server<
     private _serverInfo: Implementation,
     options?: ServerOptions,
   ) {
-    super(options);
     this._capabilities = options?.capabilities ?? {};
     this._instructions = options?.instructions;
+  }
 
-    this.setRequestHandler(InitializeRequestSchema, (request) =>
-      this._oninitialize(request),
-    );
-    this.setNotificationHandler(InitializedNotificationSchema, () =>
-      this.oninitialized?.(),
+  /**
+   * A handler to invoke for any request types that do not have their own handler installed.
+   */
+  fallbackRequestHandler?: (request: JSONRPCRequest, extra: RequestHandlerExtra) => Promise<Result>;
+
+  /**
+   * Attaches to the given transport, starts it, and starts listening for messages.
+   *
+   * The Protocol object assumes ownership of the Transport, replacing any callbacks that have already been set, and expects that it is the only user of the Transport instance going forward.
+   */
+  async connect(transport: Transport): Promise<void> {
+    this._transport = transport;
+    this._transport.onclose = () => {
+      this._onclose();
+    };
+
+    this._transport.onerror = (error: Error) => {
+      this._onerror(error);
+    };
+
+    this._transport.onmessage = (message, callback) => {
+      this.onrequest(message as JSONRPCRequest, callback);
+    };
+  }
+
+  private _onclose(): void {
+    this._transport = undefined;
+    //this.onclose?.();
+  }
+
+  private _onerror(error: Error): void {
+    //this.onerror?.(error);
+  }
+
+  protected onrequest(request: JSONRPCRequest, callback: (response: JSONRPCResponse | JSONRPCError) => void): void {
+    const extra: RequestHandlerExtra = {
+      signal: new AbortController().signal,
+    };
+
+    const handler =
+      this._requestHandlers.get(request.method) ?? this.fallbackRequestHandler;
+
+    if (handler === undefined) {
+      callback({
+        jsonrpc: "2.0",
+        id: request.id,
+        error: {
+          code: ErrorCode.MethodNotFound,
+          message: "Method not found",
+        },
+      });
+      return;
+    }
+
+    // Starting with Promise.resolve() puts any synchronous errors into the monad as well.
+    Promise.resolve()
+      .then(() => handler(request, extra))
+      .then(
+        (result) => {
+          callback({
+            result,
+            jsonrpc: "2.0",
+            id: request.id,
+          });
+        },
+        (error) => {
+          callback({
+            jsonrpc: "2.0",
+            id: request.id,
+            error: {
+              code: Number.isSafeInteger(error["code"])
+                ? error["code"]
+                : ErrorCode.InternalError,
+              message: error.message ?? "Internal error",
+            },
+          });
+        },
+      )
+      .catch((error) =>
+        this._onerror(new Error(`Failed to send response: ${error}`)),
+      );
+  }
+
+  get transport(): Transport | undefined {
+    return this._transport;
+  }
+
+  /**
+   * Closes the connection.
+   */
+  async close(): Promise<void> {
+    //await this._transport?.close();
+  }
+
+  /**
+   * Registers a handler to invoke when this protocol object receives a request with the given method.
+   *
+   * Note that this will replace any previous request handler for the same method.
+   */
+  setRequestHandler<
+    T extends ZodObject<{
+      method: ZodLiteral<string>;
+    }>,
+  >(
+    requestSchema: T,
+    handler: (
+      request: z.infer<T>,
+      extra: RequestHandlerExtra,
+    ) => Result | Promise<Result>,
+  ): void {
+    const method = requestSchema.shape.method.value;
+    this.assertRequestHandlerCapability(method);
+    this._requestHandlers.set(method, (request, extra) =>
+      Promise.resolve(handler(requestSchema.parse(request), extra)),
     );
   }
 
   /**
-   * Registers new capabilities. This can only be called before connecting to a transport.
-   *
-   * The new capabilities will be merged with any existing capabilities previously given (e.g., at initialization).
+   * Removes the request handler for the given method.
    */
-  public registerCapabilities(capabilities: ServerCapabilities): void {
-    if (this.transport) {
+  removeRequestHandler(method: string): void {
+    this._requestHandlers.delete(method);
+  }
+
+  /**
+   * Asserts that a request handler has not already been set for the given method, in preparation for a new one being automatically installed.
+   */
+  assertCanSetRequestHandler(method: string): void {
+    if (this._requestHandlers.has(method)) {
       throw new Error(
-        "Cannot register capabilities after connecting to transport",
+        `A request handler for ${method} already exists, which would be overridden`,
       );
-    }
-
-    this._capabilities = mergeCapabilities(this._capabilities, capabilities);
-  }
-
-  protected assertCapabilityForMethod(method: RequestT["method"]): void {
-    switch (method as ServerRequest["method"]) {
-      case "sampling/createMessage":
-        if (!this._clientCapabilities?.sampling) {
-          throw new Error(
-            `Client does not support sampling (required for ${method})`,
-          );
-        }
-        break;
-
-      case "roots/list":
-        if (!this._clientCapabilities?.roots) {
-          throw new Error(
-            `Client does not support listing roots (required for ${method})`,
-          );
-        }
-        break;
-
-      case "ping":
-        // No specific capability required for ping
-        break;
-    }
-  }
-
-  protected assertNotificationCapability(
-    method: (ServerNotification | NotificationT)["method"],
-  ): void {
-    switch (method as ServerNotification["method"]) {
-      case "notifications/message":
-        if (!this._capabilities.logging) {
-          throw new Error(
-            `Server does not support logging (required for ${method})`,
-          );
-        }
-        break;
-
-      case "notifications/resources/updated":
-      case "notifications/resources/list_changed":
-        if (!this._capabilities.resources) {
-          throw new Error(
-            `Server does not support notifying about resources (required for ${method})`,
-          );
-        }
-        break;
-
-      case "notifications/tools/list_changed":
-        if (!this._capabilities.tools) {
-          throw new Error(
-            `Server does not support notifying of tool list changes (required for ${method})`,
-          );
-        }
-        break;
-
-      case "notifications/prompts/list_changed":
-        if (!this._capabilities.prompts) {
-          throw new Error(
-            `Server does not support notifying of prompt list changes (required for ${method})`,
-          );
-        }
-        break;
-
-      case "notifications/cancelled":
-        // Cancellation notifications are always allowed
-        break;
-
-      case "notifications/progress":
-        // Progress notifications are always allowed
-        break;
     }
   }
 
@@ -235,98 +317,22 @@ export class Server<
           );
         }
         break;
-
-      case "ping":
-      case "initialize":
-        // No specific capability required for these methods
-        break;
     }
   }
+}
 
-  private async _oninitialize(
-    request: InitializeRequest,
-  ): Promise<InitializeResult> {
-    const requestedVersion = request.params.protocolVersion;
-
-    this._clientCapabilities = request.params.capabilities;
-    this._clientVersion = request.params.clientInfo;
-
-    return {
-      protocolVersion: SUPPORTED_PROTOCOL_VERSIONS.includes(requestedVersion)
-        ? requestedVersion
-        : LATEST_PROTOCOL_VERSION,
-      capabilities: this.getCapabilities(),
-      serverInfo: this._serverInfo,
-      ...(this._instructions && { instructions: this._instructions }),
-    };
-  }
-
-  /**
-   * After initialization has completed, this will be populated with the client's reported capabilities.
-   */
-  getClientCapabilities(): ClientCapabilities | undefined {
-    return this._clientCapabilities;
-  }
-
-  /**
-   * After initialization has completed, this will be populated with information about the client's name and version.
-   */
-  getClientVersion(): Implementation | undefined {
-    return this._clientVersion;
-  }
-
-  private getCapabilities(): ServerCapabilities {
-    return this._capabilities;
-  }
-
-  async ping() {
-    return this.request({ method: "ping" }, EmptyResultSchema);
-  }
-
-  async createMessage(
-    params: CreateMessageRequest["params"],
-    options?: RequestOptions,
-  ) {
-    return this.request(
-      { method: "sampling/createMessage", params },
-      CreateMessageResultSchema,
-      options,
-    );
-  }
-
-  async listRoots(
-    params?: ListRootsRequest["params"],
-    options?: RequestOptions,
-  ) {
-    return this.request(
-      { method: "roots/list", params },
-      ListRootsResultSchema,
-      options,
-    );
-  }
-
-  async sendLoggingMessage(params: LoggingMessageNotification["params"]) {
-    return this.notification({ method: "notifications/message", params });
-  }
-
-  async sendResourceUpdated(params: ResourceUpdatedNotification["params"]) {
-    return this.notification({
-      method: "notifications/resources/updated",
-      params,
-    });
-  }
-
-  async sendResourceListChanged() {
-    return this.notification({
-      method: "notifications/resources/list_changed",
-    });
-  }
-
-  async sendToolListChanged() {
-    return this.notification({ method: "notifications/tools/list_changed" });
-  }
-
-  async sendPromptListChanged() {
-    return this.notification({ method: "notifications/prompts/list_changed" });
-  }
+export function mergeCapabilities<
+  T extends ServerCapabilities | ClientCapabilities,
+>(base: T, additional: T): T {
+  return Object.entries(additional).reduce(
+    (acc, [key, value]) => {
+      if (value && typeof value === "object") {
+        acc[key] = acc[key] ? { ...acc[key], ...value } : value;
+      } else {
+        acc[key] = value;
+      }
+      return acc;
+    },
+    { ...base },
+  );
 }

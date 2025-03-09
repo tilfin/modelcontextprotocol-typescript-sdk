@@ -1,17 +1,10 @@
-import {
-  mergeCapabilities,
-  Protocol,
-  ProtocolOptions,
-  RequestOptions,
-} from "../shared/protocol.js";
+import { ZodLiteral, ZodObject, ZodType, z } from "zod";
 import { Transport } from "../shared/transport.js";
 import {
   CallToolRequest,
   CallToolResultSchema,
   ClientCapabilities,
-  ClientNotification,
   ClientRequest,
-  ClientResult,
   CompatibilityCallToolResultSchema,
   CompleteRequest,
   CompleteResultSchema,
@@ -20,6 +13,9 @@ import {
   GetPromptResultSchema,
   Implementation,
   InitializeResultSchema,
+  JSONRPCError,
+  JSONRPCRequest,
+  JSONRPCResponse,
   LATEST_PROTOCOL_VERSION,
   ListPromptsRequest,
   ListPromptsResultSchema,
@@ -29,24 +25,61 @@ import {
   ListResourceTemplatesResultSchema,
   ListToolsRequest,
   ListToolsResultSchema,
-  LoggingLevel,
-  Notification,
   ReadResourceRequest,
   ReadResourceResultSchema,
   Request,
   Result,
-  ServerCapabilities,
-  SubscribeRequest,
-  SUPPORTED_PROTOCOL_VERSIONS,
   UnsubscribeRequest,
 } from "../types.js";
 
-export type ClientOptions = ProtocolOptions & {
+export type ClientOptions = {
   /**
    * Capabilities to advertise as being supported by this client.
    */
   capabilities?: ClientCapabilities;
 };
+
+/**
+ * Options that can be given per request.
+ */
+export type RequestOptions = {
+  /**
+   * Can be used to cancel an in-flight request. This will cause an AbortError to be raised from request().
+   */
+  signal?: AbortSignal;
+
+  /**
+   * A timeout (in milliseconds) for this request. If exceeded, an McpError with code `RequestTimeout` will be raised from request().
+   *
+   * If not specified, `DEFAULT_REQUEST_TIMEOUT_MSEC` will be used as the timeout.
+   */
+  timeout?: number;
+
+  /**
+   * If true, receiving a progress notification will reset the request timeout.
+   * This is useful for long-running operations that send periodic progress updates.
+   * Default: false
+   */
+  resetTimeoutOnProgress?: boolean;
+
+  /**
+   * Maximum total time (in milliseconds) to wait for a response.
+   * If exceeded, an McpError with code `RequestTimeout` will be raised, regardless of progress notifications.
+   * If not specified, there is no maximum total timeout.
+   */
+  maxTotalTimeout?: number;
+};
+
+/**
+ * Extra data given to request handlers.
+ */
+export type RequestHandlerExtra = {
+  /**
+   * An abort signal used to communicate if the request was cancelled from the sender's side.
+   */
+  signal: AbortSignal;
+};
+
 
 /**
  * An MCP client on top of a pluggable transport.
@@ -73,253 +106,58 @@ export type ClientOptions = ProtocolOptions & {
  * })
  * ```
  */
-export class Client<
-  RequestT extends Request = Request,
-  NotificationT extends Notification = Notification,
-  ResultT extends Result = Result,
-> extends Protocol<
-  ClientRequest | RequestT,
-  ClientNotification | NotificationT,
-  ClientResult | ResultT
-> {
-  private _serverCapabilities?: ServerCapabilities;
-  private _serverVersion?: Implementation;
-  private _capabilities: ClientCapabilities;
-  private _instructions?: string;
+export class Client {
+  private _transport?: Transport;
+  private _requestMessageId = 0;
 
-  /**
-   * Initializes this client with the given name and version information.
-   */
-  constructor(
-    private _clientInfo: Implementation,
-    options?: ClientOptions,
-  ) {
-    super(options);
-    this._capabilities = options?.capabilities ?? {};
+  constructor(transport: Transport) {
+    this._transport = transport;
   }
 
   /**
-   * Registers new capabilities. This can only be called before connecting to a transport.
+   * Sends a request and wait for a response.
    *
-   * The new capabilities will be merged with any existing capabilities previously given (e.g., at initialization).
+   * Do not use this method to emit notifications! Use notification() instead.
    */
-  public registerCapabilities(capabilities: ClientCapabilities): void {
-    if (this.transport) {
-      throw new Error(
-        "Cannot register capabilities after connecting to transport",
-      );
-    }
-
-    this._capabilities = mergeCapabilities(this._capabilities, capabilities);
-  }
-
-  protected assertCapability(
-    capability: keyof ServerCapabilities,
-    method: string,
-  ): void {
-    if (!this._serverCapabilities?.[capability]) {
-      throw new Error(
-        `Server does not support ${capability} (required for ${method})`,
-      );
-    }
-  }
-
-  override async connect(transport: Transport): Promise<void> {
-    await super.connect(transport);
-
-    try {
-      const result = await this.request(
-        {
-          method: "initialize",
-          params: {
-            protocolVersion: LATEST_PROTOCOL_VERSION,
-            capabilities: this._capabilities,
-            clientInfo: this._clientInfo,
-          },
-        },
-        InitializeResultSchema,
-      );
-
-      if (result === undefined) {
-        throw new Error(`Server sent invalid initialize result: ${result}`);
+  request<T extends ZodType<object>>(
+    request: Request,
+    resultSchema: T,
+    options?: RequestOptions,
+  ): Promise<z.infer<T>> {
+    return new Promise((resolve, reject) => {
+      if (!this._transport) {
+        reject(new Error("Not connected"));
+        return;
       }
 
-      if (!SUPPORTED_PROTOCOL_VERSIONS.includes(result.protocolVersion)) {
-        throw new Error(
-          `Server's protocol version is not supported: ${result.protocolVersion}`,
-        );
-      }
+      options?.signal?.throwIfAborted();
 
-      this._serverCapabilities = result.capabilities;
-      this._serverVersion = result.serverInfo;
+      const messageId = this._requestMessageId++;
+      const jsonrpcRequest: JSONRPCRequest = {
+        ...request,
+        jsonrpc: "2.0",
+        id: messageId,
+      };
 
-      this._instructions = result.instructions;
+      this._transport.send(jsonrpcRequest, (response) => {
+        if (isJSONRPCError(response)) {
+          return reject(response.error);
+        }
 
-      await this.notification({
-        method: "notifications/initialized",
+        try {
+          const result = resultSchema.parse(response.result);
+          resolve(result);
+        } catch (error) {
+          reject(error);
+        }
       });
-    } catch (error) {
-      // Disconnect if initialization fails.
-      void this.close();
-      throw error;
-    }
-  }
-
-  /**
-   * After initialization has completed, this will be populated with the server's reported capabilities.
-   */
-  getServerCapabilities(): ServerCapabilities | undefined {
-    return this._serverCapabilities;
-  }
-
-  /**
-   * After initialization has completed, this will be populated with information about the server's name and version.
-   */
-  getServerVersion(): Implementation | undefined {
-    return this._serverVersion;
-  }
-
-  /**
-   * After initialization has completed, this may be populated with information about the server's instructions.
-   */
-  getInstructions(): string | undefined {
-    return this._instructions;
-  }
-
-  protected assertCapabilityForMethod(method: RequestT["method"]): void {
-    switch (method as ClientRequest["method"]) {
-      case "logging/setLevel":
-        if (!this._serverCapabilities?.logging) {
-          throw new Error(
-            `Server does not support logging (required for ${method})`,
-          );
-        }
-        break;
-
-      case "prompts/get":
-      case "prompts/list":
-        if (!this._serverCapabilities?.prompts) {
-          throw new Error(
-            `Server does not support prompts (required for ${method})`,
-          );
-        }
-        break;
-
-      case "resources/list":
-      case "resources/templates/list":
-      case "resources/read":
-      case "resources/subscribe":
-      case "resources/unsubscribe":
-        if (!this._serverCapabilities?.resources) {
-          throw new Error(
-            `Server does not support resources (required for ${method})`,
-          );
-        }
-
-        if (
-          method === "resources/subscribe" &&
-          !this._serverCapabilities.resources.subscribe
-        ) {
-          throw new Error(
-            `Server does not support resource subscriptions (required for ${method})`,
-          );
-        }
-
-        break;
-
-      case "tools/call":
-      case "tools/list":
-        if (!this._serverCapabilities?.tools) {
-          throw new Error(
-            `Server does not support tools (required for ${method})`,
-          );
-        }
-        break;
-
-      case "completion/complete":
-        if (!this._serverCapabilities?.prompts) {
-          throw new Error(
-            `Server does not support prompts (required for ${method})`,
-          );
-        }
-        break;
-
-      case "initialize":
-        // No specific capability required for initialize
-        break;
-
-      case "ping":
-        // No specific capability required for ping
-        break;
-    }
-  }
-
-  protected assertNotificationCapability(
-    method: NotificationT["method"],
-  ): void {
-    switch (method as ClientNotification["method"]) {
-      case "notifications/roots/list_changed":
-        if (!this._capabilities.roots?.listChanged) {
-          throw new Error(
-            `Client does not support roots list changed notifications (required for ${method})`,
-          );
-        }
-        break;
-
-      case "notifications/initialized":
-        // No specific capability required for initialized
-        break;
-
-      case "notifications/cancelled":
-        // Cancellation notifications are always allowed
-        break;
-
-      case "notifications/progress":
-        // Progress notifications are always allowed
-        break;
-    }
-  }
-
-  protected assertRequestHandlerCapability(method: string): void {
-    switch (method) {
-      case "sampling/createMessage":
-        if (!this._capabilities.sampling) {
-          throw new Error(
-            `Client does not support sampling capability (required for ${method})`,
-          );
-        }
-        break;
-
-      case "roots/list":
-        if (!this._capabilities.roots) {
-          throw new Error(
-            `Client does not support roots capability (required for ${method})`,
-          );
-        }
-        break;
-
-      case "ping":
-        // No specific capability required for ping
-        break;
-    }
-  }
-
-  async ping(options?: RequestOptions) {
-    return this.request({ method: "ping" }, EmptyResultSchema, options);
+    });
   }
 
   async complete(params: CompleteRequest["params"], options?: RequestOptions) {
     return this.request(
       { method: "completion/complete", params },
       CompleteResultSchema,
-      options,
-    );
-  }
-
-  async setLoggingLevel(level: LoggingLevel, options?: RequestOptions) {
-    return this.request(
-      { method: "logging/setLevel", params: { level } },
-      EmptyResultSchema,
       options,
     );
   }
@@ -379,28 +217,6 @@ export class Client<
     );
   }
 
-  async subscribeResource(
-    params: SubscribeRequest["params"],
-    options?: RequestOptions,
-  ) {
-    return this.request(
-      { method: "resources/subscribe", params },
-      EmptyResultSchema,
-      options,
-    );
-  }
-
-  async unsubscribeResource(
-    params: UnsubscribeRequest["params"],
-    options?: RequestOptions,
-  ) {
-    return this.request(
-      { method: "resources/unsubscribe", params },
-      EmptyResultSchema,
-      options,
-    );
-  }
-
   async callTool(
     params: CallToolRequest["params"],
     resultSchema:
@@ -425,8 +241,8 @@ export class Client<
       options,
     );
   }
+}
 
-  async sendRootsListChanged() {
-    return this.notification({ method: "notifications/roots/list_changed" });
-  }
+function isJSONRPCError(arg: JSONRPCResponse | JSONRPCError): arg is JSONRPCError {
+  return (arg as any).error !== undefined;
 }
