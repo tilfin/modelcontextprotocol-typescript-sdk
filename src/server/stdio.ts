@@ -1,6 +1,6 @@
 import process from "node:process";
 import { Readable, Writable } from "node:stream";
-import { ReadBuffer, serializeMessage } from "../shared/stdio.js";
+import { ReadBuffer, serializeMessage } from "../shared/read-buffer.js";
 import { JSONRPCError, JSONRPCMessage, JSONRPCResponse } from "../types.js";
 import { Transport } from "../shared/transport.js";
 

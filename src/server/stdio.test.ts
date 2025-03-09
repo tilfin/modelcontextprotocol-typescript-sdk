@@ -1,5 +1,5 @@
 import { Readable, Writable } from "node:stream";
-import { ReadBuffer, serializeMessage } from "../shared/stdio.js";
+import { ReadBuffer, serializeMessage } from "../shared/read-buffer.js";
 import { JSONRPCMessage } from "../types.js";
 import { StdioServerTransport } from "./stdio.js";
 

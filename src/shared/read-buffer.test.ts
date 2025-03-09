@@ -1,5 +1,5 @@
 import { JSONRPCMessage } from "../types.js";
-import { ReadBuffer } from "./stdio.js";
+import { ReadBuffer } from "./read-buffer.js";
 
 const testMessage: JSONRPCMessage = {
   jsonrpc: "2.0",
