@@ -1,5 +1,5 @@
-import { Transport } from "./shared/transport.js";
-import { JSONRPCError, JSONRPCMessage, JSONRPCResponse } from "./types.js";
+import { Transport } from "../shared/transport.js";
+import { JSONRPCError, JSONRPCMessage, JSONRPCResponse } from "../types.js";
 
 /**
  * In-memory transport for creating clients and servers that talk to each other within the same process.

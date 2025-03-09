@@ -17,7 +17,7 @@ import {
   ErrorCode,
 } from "../types.js";
 import { Transport } from "../shared/transport.js";
-import { InMemoryTransport } from "../inMemory.js";
+import { InMemoryTransport } from "../transport/inMemory.js";
 import { Client } from "../client/index.js";
 
 test("should accept latest protocol version", async () => {

@@ -18,7 +18,7 @@ import {
 } from "../types.js";
 import { Transport } from "../shared/transport.js";
 import { Server } from "../server/index.js";
-import { InMemoryTransport } from "../inMemory.js";
+import { InMemoryTransport } from "../transport/inMemory.js";
 
 test("should initialize with matching protocol version", async () => {
   const clientTransport: Transport = {
