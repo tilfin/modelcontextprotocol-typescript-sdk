@@ -6,8 +6,6 @@ import {
   JSONRPCError,
   JSONRPCRequest,
   JSONRPCResponse,
-  McpError,
-  RequestId,
   Result,
   ServerCapabilities,
 } from "../types.js";
@@ -138,6 +136,20 @@ export class Server {
   }
 
   /**
+   * Callback for when the connection is closed for any reason.
+   *
+   * This is invoked when close() is called as well.
+   */
+  onclose?: () => void;
+
+  /**
+   * Callback for when an error occurs.
+   *
+   * Note that errors are not necessarily fatal; they are used for reporting any kind of exceptional condition out of band.
+   */
+  onerror?: (error: Error) => void;
+
+  /**
    * A handler to invoke for any request types that do not have their own handler installed.
    */
   fallbackRequestHandler?: (request: JSONRPCRequest, extra: RequestHandlerExtra) => Promise<Result>;
@@ -164,11 +176,11 @@ export class Server {
 
   private _onclose(): void {
     this._transport = undefined;
-    //this.onclose?.();
+    this.onclose?.();
   }
 
   private _onerror(error: Error): void {
-    //this.onerror?.(error);
+    this.onerror?.(error);
   }
 
   protected onrequest(request: JSONRPCRequest, callback: (response: JSONRPCResponse | JSONRPCError) => void): void {

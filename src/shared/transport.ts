@@ -1,4 +1,10 @@
-import { JSONRPCError, JSONRPCMessage, JSONRPCResponse } from "../types.js";
+import { JSONRPCError, JSONRPCRequest, JSONRPCResponse } from "../types.js";
+
+export type TransportRPCCallback = (response: JSONRPCResponse | JSONRPCError) => void;
+
+export function isJSONRPCError(arg: JSONRPCResponse | JSONRPCError): arg is JSONRPCError {
+  return (arg as any).error !== undefined;
+}
 
 /**
  * Describes the minimal contract for a MCP transport that a client or server can communicate over.
@@ -16,7 +22,7 @@ export interface Transport {
   /**
    * Sends a JSON-RPC message (request or response).
    */
-  send(message: JSONRPCMessage, callback: (response: JSONRPCResponse | JSONRPCError) => void): Promise<void>;
+  send(request: JSONRPCRequest, callback: TransportRPCCallback): void;
 
   /**
    * Closes the connection.
@@ -40,5 +46,5 @@ export interface Transport {
   /**
    * Callback for when a message (request or response) is received over the connection.
    */
-  onmessage?: (message: JSONRPCMessage, callback: (response: JSONRPCResponse | JSONRPCError) => void) => void;
+  onmessage?: (request: JSONRPCRequest, callback: TransportRPCCallback) => void;
 }

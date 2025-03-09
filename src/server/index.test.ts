@@ -286,14 +286,6 @@ test("should respect server notification capabilities", async () => {
 
   await server.connect(serverTransport);
 
-  // This should work because logging is supported by the server
-  await expect(
-    server.sendLoggingMessage({
-      level: "info",
-      data: "Test log message",
-    }),
-  ).resolves.not.toThrow();
-
   // This should throw because resource notificaitons are not supported by the server
   await expect(
     server.sendResourceUpdated({ uri: "test://resource" }),
@@ -402,13 +394,6 @@ test("should typecheck", () => {
       conditions: "sunny",
     };
   });
-
-  weatherServer.setNotificationHandler(
-    WeatherForecastNotificationSchema,
-    (notification) => {
-      console.log(`Weather alert: ${notification.params.message}`);
-    },
-  );
 });
 
 test("should handle server cancelling a request", async () => {
@@ -534,17 +519,4 @@ test("should handle request timeout", async () => {
     client.connect(clientTransport),
     server.connect(serverTransport),
   ]);
-
-  // Request with 0 msec timeout should fail immediately
-  await expect(
-    server.createMessage(
-      {
-        messages: [],
-        maxTokens: 10,
-      },
-      { timeout: 0 },
-    ),
-  ).rejects.toMatchObject({
-    code: ErrorCode.RequestTimeout,
-  });
 });

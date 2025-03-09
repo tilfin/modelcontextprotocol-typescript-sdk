@@ -1,5 +1,5 @@
-import { Transport } from "../shared/transport.js";
-import { JSONRPCError, JSONRPCMessage, JSONRPCResponse } from "../types.js";
+import { Transport, TransportRPCCallback } from "../shared/transport.js";
+import { JSONRPCMessage } from "../types.js";
 
 /**
  * In-memory transport for creating clients and servers that talk to each other within the same process.
@@ -10,7 +10,7 @@ export class InMemoryTransport implements Transport {
 
   onclose?: () => void;
   onerror?: (error: Error) => void;
-  onmessage?: (message: JSONRPCMessage, callback: (response: JSONRPCResponse | JSONRPCError) => void) => void;
+  onmessage?: (message: JSONRPCMessage, callback: TransportRPCCallback) => void;
 
   /**
    * Creates a pair of linked in-memory transports that can communicate with each other. One should be passed to a Client and one to a Server.
@@ -27,7 +27,7 @@ export class InMemoryTransport implements Transport {
 
   async close(): Promise<void> {}
 
-  async send(message: JSONRPCMessage, callback: (response: JSONRPCResponse | JSONRPCError) => void): Promise<void> {
+  send(message: JSONRPCMessage, callback: TransportRPCCallback): void {
     if (!this._otherTransport) {
       throw new Error("Not connected");
     }

@@ -1,22 +1,16 @@
 import { ZodLiteral, ZodObject, ZodType, z } from "zod";
-import { Transport } from "../shared/transport.js";
+import { isJSONRPCError, Transport } from "../shared/transport.js";
 import {
   CallToolRequest,
   CallToolResultSchema,
   ClientCapabilities,
-  ClientRequest,
   CompatibilityCallToolResultSchema,
   CompleteRequest,
   CompleteResultSchema,
-  EmptyResultSchema,
   GetPromptRequest,
   GetPromptResultSchema,
   Implementation,
-  InitializeResultSchema,
-  JSONRPCError,
   JSONRPCRequest,
-  JSONRPCResponse,
-  LATEST_PROTOCOL_VERSION,
   ListPromptsRequest,
   ListPromptsResultSchema,
   ListResourcesRequest,
@@ -28,8 +22,6 @@ import {
   ReadResourceRequest,
   ReadResourceResultSchema,
   Request,
-  Result,
-  UnsubscribeRequest,
 } from "../types.js";
 
 export type ClientOptions = {
@@ -109,8 +101,19 @@ export type RequestHandlerExtra = {
 export class Client {
   private _transport?: Transport;
   private _requestMessageId = 0;
+  private _capabilities: ClientCapabilities;
 
-  constructor(transport: Transport) {
+  /**
+   * Initializes this client with the given name and version information.
+   */
+  constructor(
+    private _clientInfo: Implementation,
+    options?: ClientOptions,
+  ) {
+    this._capabilities = options?.capabilities ?? {};
+  }
+
+  connect(transport: Transport) {
     this._transport = transport;
   }
 
@@ -241,8 +244,4 @@ export class Client {
       options,
     );
   }
-}
-
-function isJSONRPCError(arg: JSONRPCResponse | JSONRPCError): arg is JSONRPCError {
-  return (arg as any).error !== undefined;
 }

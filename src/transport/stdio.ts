@@ -1,8 +1,8 @@
 import process from "node:process";
 import { Readable, Writable } from "node:stream";
 import { ReadBuffer, serializeMessage } from "../shared/read-buffer.js";
-import { JSONRPCError, JSONRPCMessage, JSONRPCResponse } from "../types.js";
-import { Transport } from "../shared/transport.js";
+import { JSONRPCRequest } from "../types.js";
+import { Transport, TransportRPCCallback } from "../shared/transport.js";
 
 /**
  * Server transport for stdio: this communicates with a MCP client by reading from the current process' stdin and writing to stdout.
@@ -12,15 +12,18 @@ import { Transport } from "../shared/transport.js";
 export class StdioServerTransport implements Transport {
   private _readBuffer: ReadBuffer = new ReadBuffer();
   private _started = false;
+  private _callbackMap = new Map<string | number, TransportRPCCallback>();
 
   constructor(
     private _stdin: Readable = process.stdin,
     private _stdout: Writable = process.stdout,
-  ) {}
+  ) {
+    this._callbackMap = new Map();
+  }
 
   onclose?: () => void;
   onerror?: (error: Error) => void;
-  onmessage?: (message: JSONRPCMessage, callback: (response: JSONRPCResponse | JSONRPCError) => void) => void;
+  onmessage?: (request: JSONRPCRequest, callback: TransportRPCCallback) => void;
 
   // Arrow functions to bind `this` properly, while maintaining function identity.
   _ondata = (chunk: Buffer) => {
@@ -54,9 +57,12 @@ export class StdioServerTransport implements Transport {
           break;
         }
 
-        this.onmessage?.(message, (response) => {
-          this.send(response);
-        });
+        if ('id' in message && 'method' in message) {
+          this.onmessage?.(message as JSONRPCRequest, (response) => {
+            this._callbackMap.get(response.id)?.(response);
+            this._callbackMap.delete(response.id);
+          });
+        }
       } catch (error) {
         this.onerror?.(error as Error);
       }
@@ -78,17 +84,17 @@ export class StdioServerTransport implements Transport {
     
     // Clear the buffer and notify closure
     this._readBuffer.clear();
+    this._callbackMap.clear();
     this.onclose?.();
   }
 
-  send(message: JSONRPCMessage): Promise<void> {
-    return new Promise((resolve) => {
-      const json = serializeMessage(message);
-      if (this._stdout.write(json)) {
-        resolve();
-      } else {
-        this._stdout.once("drain", resolve);
-      }
-    });
+  send(request: JSONRPCRequest, callback: TransportRPCCallback): void {
+    this._callbackMap.set(request.id, callback);
+
+    const json = serializeMessage(request);
+    if (this._stdout.write(json)) {
+    } else {
+      this._stdout.once("drain", () => {});
+    }
   }
 }
